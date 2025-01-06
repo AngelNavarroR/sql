@@ -1,0 +1,661 @@
+select max(id) from sgm_financiero.ren_liquidacion;  -- 471191
+select max(id) from sgm_financiero.ren_det_liquidacion; -- 1713624
+select * from catastro.ctlg_salario;
+
+INSERT INTO catastro.ctlg_salario
+(anio, valor)
+VALUES(2025, 470.00);
+
+select * from catastro.aval_banda_impositiva
+
+select catastro.emision_predial_ren_liquidacion_anual(0, current_user, 2025, 2025, true);
+
+
+
+-- _predio_id = 0 envia a realizar la emision de todos los predios 
+-- usuario usuario que envio a ejecutar el proceso 
+-- anio_inicio_val año desde donde va realiza la emision 
+-- anio_fin_val año hasta cuando va realzia la emision 
+-- considera_construccion si se debe considerar la construccion en la emision anual 
+-- Debe ingresar el salario basico del siguente anio (catastro.ctlg_salario) 
+CREATE OR REPLACE FUNCTION catastro.emision_predial_ren_liquidacion_anual(_predio_id bigint, usuario text
+, anio_inicio_val integer, anio_fin_val integer, considera_construccion boolean)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+<<fn>>
+	DECLARE
+		predio RECORD;
+		resp text;
+		avaluo_anterior RECORD;
+		anio_anterior integer;
+		ACIERTOS BIGINT := 0;
+		total_reg BIGINT := 0;
+		
+	declare contador1 integer;
+	declare emision cursor for select * from sgm_financiero.ren_liquidacion l where l.anio = (anio_fin_val - 1) and l.tipo_liquidacion = 303;
+	declare em record;
+	declare em_det record;
+	DECLARE cem_migra BIGINT;
+	DECLARE salario bigint;
+
+	BEGIN
+	--- OBTIENE EL AÑO ANTERIOR PARA CUANDO SE CALCULE A UNO DIFERENTE AL ACTUAL
+	SELECT id into salario FROM catastro.ctlg_salario cs where anio = anio_fin_val;
+	if salario is null then 
+		raise notice 'Debe ingresar el salario del anio % para continuar', anio_fin_val;
+		return 'Debe ingresar el salario del anio ' || anio_fin_val || ' para continuar';
+	end if;
+	anio_anterior := (select extract(year from now())::INTEGER)  - 1;
+	select count(*) into total_reg FROM catastro.cat_predio p WHERE estado = 'A' AND tipo_predio = 'U';
+	ACIERTOS = 0;
+	--PREDIO
+	--SE LE ENVIA CERO CUANDO SSE VAN A EVALUAR TODOS LOS PREDIOS
+		IF (_predio_id = 0) THEN 
+			FOR predio IN SELECT id, avaluo_construccion, avaluo_solar, p.avaluo_municipal, tipo_predio, num_predio    
+				FROM catastro.cat_predio p WHERE estado = 'A' AND tipo_predio = 'U' ORDER BY num_predio ASC LOOP
+				ACIERTOS := ACIERTOS + 1;
+				-- UPDATE sgm_financiero.ren_liquidacion set estado_liquidacion = 3  WHERE sgm_financiero.ren_liquidacion.anio = anio_inicio_val and sgm_financiero.ren_liquidacion.predio = predio.id;
+				resp := catastro.calculo_impuesto_predial(predio.id, usuario, 1, predio.avaluo_construccion, anio_inicio_val, anio_fin_val,  considera_construccion );
+				PERFORM catastro.emision_predial_predio_exonerado(predio.id, anio_inicio_val);
+				-- RAISE NOTICE 'ACIERTOS %', ACIERTOS;
+				-- catastro.insert_values_iniciales_liquidaciones(usuario, anio_inicio_val);
+				if (ACIERTOS % 100) = 0 then 
+					RAISE NOTICE 'Registro procesados % de %', ACIERTOS, total_reg;
+				end if;
+			END LOOP;
+		with s as (
+			select sum(d.valor) total_s, d.liquidacion from sgm_financiero.ren_liquidacion l inner join sgm_financiero.ren_det_liquidacion d on l.id = d.liquidacion 
+			where l.anio = anio_inicio_val and l.tipo_liquidacion = 13 group by 2
+		) update sgm_financiero.ren_liquidacion lx set total_pago = s.total_s, saldo = s.total_s from s where s.liquidacion=lx.id;
+		-- **************************
+		-- COPIA DE CEM 303
+		-- **************************
+		contador1=0;
+		FOR em  in emision LOOP
+			INSERT INTO sgm_financiero.ren_liquidacion(tramite, num_comprobante, num_liquidacion, id_liquidacion, tipo_liquidacion, 
+													   total_pago, usuario_ingreso, fecha_ingreso, comprador, vendedor, costo_adq, 
+													   cuantia, fecha_contrato_ant, saldo, estado_liquidacion, coactiva, codigo_local, 
+													   predio, local_comercial, observacion, anio, valor_comercial, valor_catastral, 
+													   valor_hipoteca, valor_nominal, valor_mora, total_adicionales, otros, valor_compra, 
+													   valor_venta, valor_mejoras, area_total, patrimonio, num_reporte, avaluo_municipal, 
+													   avaluo_construccion, avaluo_solar, bombero, categoria_predio, predio_rustico, 
+													   estado_coactiva, exonerado, nombre_comprador, nombre_comprador_historic, 
+													   banda_impositiva, rural_excel, banda_temp_2, nombre_comprador_respaldo, 
+													   migrado, estado_referencia, predio_migrado, predio_historico, identificacion, 
+													   temporal, valor_exoneracion, exoneracion_descripcion, porciento_rebaja, validada, 
+													   fecha_creacion_original, base_imponible, usuario_valida, patente, ubicacion, 
+													   vendedor_rural, vendedor_rural_identificacion, clave_catastral_rural, 
+													   departamento_detalle_titulos, usuario_anular, convenio_pago, fecha_anulacion,
+													   mac_addres_usuario_ingreso, ip_user_session, cuenta_agua, t_cartera, t_titulo, rentas)
+				values(em.tramite, em.num_comprobante, em.num_liquidacion, em.id_liquidacion, em.tipo_liquidacion, em.total_pago, em.usuario_ingreso, 
+					now(), em.comprador, em.vendedor, em.costo_adq, em.cuantia, em.fecha_contrato_ant, em.total_pago, 
+					2, em.coactiva, em.codigo_local, em.predio, em.local_comercial, em.observacion, 
+					anio_fin_val, em.valor_comercial, em.valor_catastral, em.valor_hipoteca, em.valor_nominal, em.valor_mora, 
+					em.total_adicionales, em.otros, em.valor_compra, em.valor_venta, em.valor_mejoras, em.area_total, 
+					em.patrimonio, em.num_reporte, em.avaluo_municipal, em.avaluo_construccion, em.avaluo_solar, em.bombero, 
+					em.categoria_predio, em.predio_rustico, em.estado_coactiva, em.exonerado, em.nombre_comprador, 
+					em.nombre_comprador_historic, em.banda_impositiva, em.rural_excel, em.banda_temp_2, em.nombre_comprador_respaldo, 
+					em.migrado, em.estado_referencia, em.predio_migrado, em.predio_historico, em.identificacion, em.temporal, 
+					em.valor_exoneracion, em.exoneracion_descripcion, em.porciento_rebaja, em.validada, em.fecha_creacion_original, 
+					em.base_imponible, em.usuario_valida, em.patente, em.ubicacion, em.vendedor_rural, em.vendedor_rural_identificacion, 
+					em.clave_catastral_rural, em.departamento_detalle_titulos, em.usuario_anular, em.convenio_pago, em.fecha_anulacion,
+					em.mac_addres_usuario_ingreso, em.ip_user_session, em.cuenta_agua, em.t_cartera, em.t_titulo, em.rentas )
+					RETURNING id INTO cem_migra;
+		
+				FOR em_det IN SELECT * FROM sgm_financiero.ren_det_liquidacion where liquidacion = em.id LOOP
+					insert into sgm_financiero.ren_det_liquidacion(liquidacion,rubro,valor,estado,valor_recaudado) 
+						values (cem_migra,em_det.rubro,em_det.valor,true,0.00);
+				END LOOP;
+				contador1 = contador1+1;
+		END LOOP;
+		RAISE NOTICE 'PROCESADOS MEJORAS %', contador1;
+		-- **************************
+		-- FIN COPIA DE CEM 303
+		-- **************************
+	
+			-- INSERTAMOS LOS VALORES INICIALES
+			INSERT INTO sgm_financiero.ren_valor_inicial_emision (rubro_liquidacion, anio, valor_inicial, estado) 
+			SELECT d.rubro, l.anio, SUM(d.valor), true FROM sgm_financiero.ren_det_liquidacion d 
+			INNER JOIN sgm_financiero.ren_liquidacion l ON l.id = d.liquidacion WHERE l.anio = anio_inicio_val
+			GROUP BY 1,2,4;
+		
+		ELSE
+			FOR predio IN SELECT * FROM catastro.cat_predio WHERE id = _predio_id LOOP
+				--UPDATE sgm_financiero.ren_liquidacion set estado_liquidacion = 3  WHERE sgm_financiero.ren_liquidacion.anio = anio_inicio_val and sgm_financiero.ren_liquidacion.predio = predio.id;	   
+				--CALCULO CON EL AVLAUO DE ANIOS ANTERIORES 
+				IF(anio_inicio_val <= anio_anterior) THEN 
+					SELECT * INTO avaluo_anterior FROM  catastro.emitir_predio_anio_anterior(predio.id , anio_inicio_val, anio_fin_val, usuario, predio.area_solar, predio.area_declarada_const, considera_construccion);
+					IF (avaluo_anterior.avaltotal IS NOT NULL AND avaluo_anterior.avaltotal > 0 )THEN 
+						predio.avaluo_municipal := avaluo_anterior.avaltotal;
+						predio.avaluo_construccion := avaluo_anterior.avaledif;
+						predio.avaluo_solar := avaluo_anterior.avalsolar;
+					END IF;
+					resp := catastro.calculo_impuesto_predial(predio.id, usuario, 1, predio.avaluo_municipal, anio_inicio_val, anio_fin_val , considera_construccion);
+				ELSE
+					--resp := catastro.avaluar_predio( predio.id, usuario, anio_inicio_val , anio_fin_val , false);
+					resp := catastro.calculo_impuesto_predial(predio.id, usuario, 1, predio.avaluo_municipal, anio_inicio_val, anio_fin_val,  considera_construccion );
+					PERFORM catastro.emision_predial_predio_exonerado(predio.id, anio_inicio_val);
+				END IF;
+				
+			END LOOP;
+		END IF;
+		
+		RETURN 'OKI';
+	END
+$function$
+;
+
+
+CREATE OR REPLACE FUNCTION catastro.calculo_impuesto_predial(_predio_id bigint, usuario text, id_aval_impuesto bigint, avaluo_municipal numeric, anio_inicio_val integer, anio_fin_val integer, considera_construccion boolean)
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+<<fn>>
+	DECLARE
+	aval_impuesto_predios   RECORD;				ubicaciones             	RECORD;
+	ubicacion_predio        BIGINT :=0;			es_predio_marginal      	BOOLEAN := FALSE;
+	obra_ubicacion          RECORD;				banda                   	RECORD;
+	impuesto_predial        numeric :=0.00;		solar_no_edif           	numeric := 0.0;
+	tasa_seg   				numeric := 0.0;		calculo_bombero         	numeric := 0.0;
+	calculo_mejora          numeric := 0.0;		calculo_mejora1         	numeric := 0.0;
+	calculo_mejora2         numeric := 0.0;		calculo_mejora3         	numeric := 0.0;
+	calculo_mejora4         numeric := 0.0;		calculo_mejora_tola     	numeric := 0.0;
+	tasa_administrativa     numeric := 0.0;		valor_tasa_administrativa  	numeric := 0.0;
+	resut                   numeric := 0.0;		resut_total_emitido     	numeric := 0.0;
+	valor_banda             numeric := 0.0;		aval_det_cobro_impuesto_predios RECORD;
+	predio                  RECORD;				remuneraciones_salariales_25 numeric (19,2) := 0.00;
+	contador                bigint := 0;		max_num_liquidacion			bigint := 0;
+	data_					record;				data_sal					record;
+	BEGIN
+		SELECT * into data_sal FROM catastro.ctlg_salario cs where anio = anio_fin_val;
+		if data_sal.id is null then 
+			INSERT INTO catastro.ctlg_salario (anio,valor) VALUES (anio_fin_val,460.00);
+		end if;
+		SELECT p.id, p.avaluo_municipal, p.propiedad 
+			INTO predio FROM catastro.cat_predio p WHERE id = _predio_id;
+		SELECT * INTO banda FROM catastro.aval_banda_impositiva cfc1 WHERE coalesce(predio.avaluo_municipal, 0.00) BETWEEN cfc1.desde_us AND cfc1.hasta_us;
+		IF(predio.propiedad is null) THEN predio.propiedad = 3840; END IF;
+
+		SELECT * into data_sal FROM catastro.ctlg_salario cs where anio = anio_fin_val;
+		remuneraciones_salariales_25  := (data_sal.valor * 25);
+		-- raise notice 'Salario %', data_sal.valor;
+		-- SELECT * FROM sgm_financiero.ren_rubros_liquidacion WHERE id in(3, 7, 988, 8, 640, 986, 987, 989)
+		for data_ in SELECT id, valor, estado FROM sgm_financiero.ren_rubros_liquidacion WHERE id in(3, 7, 988, 8, 640, 986, 987, 989) loop 
+				IF(predio.propiedad NOT IN (3839))THEN 
+				---TASAS ADMINISRATIVAS RUBRO 3
+				IF data_.id = 3 AND data_.estado = true THEN 
+					--SELECT * FROM catastro.ctlg_salario cs;
+					-- Calculamos el valor de tasa administrativa
+					valor_tasa_administrativa := round((data_sal.valor * 0.003), 2); 
+				if valor_tasa_administrativa = 0 then 
+					valor_tasa_administrativa = 1.38;
+				end if;
+				END IF;
+				---TASA DE SEGURIDAD 7
+				IF data_.id = 988 AND data_.estado = true THEN
+					tasa_seg := data_.valor;
+				END IF;
+				---COBRO DE BOMBEROS  :D RUBRO 7
+				IF data_.id = 7 AND data_.estado = true THEN
+					calculo_bombero := round((0.15 * predio.avaluo_municipal) / 1000, 2);
+				END IF;
+				----MEJORA 1 ==> CEM Reg. Urb. 
+				IF data_.id = 8 AND data_.estado = true THEN
+					calculo_mejora := data_.valor;
+				END IF;
+				---CEM2 ==> CEM PARQUE 
+				IF data_.id = 640 AND data_.estado = true THEN
+					calculo_mejora1 := data_.valor;
+				END IF;
+				---CEM3 ==> CEM ASFALTO 
+				IF data_.id = 986 AND data_.estado = true THEN
+					calculo_mejora2 := data_.valor;
+				END IF;
+				---CEM4 ==> CEM POZ. EMIL 
+				IF data_.id = 989 AND data_.estado = true THEN
+					--calculo_mejora4 := data_.valor;
+					SELECT d.valor into calculo_mejora4 FROM sgm_financiero.ren_liquidacion l
+						INNER JOIN sgm_financiero.ren_det_liquidacion d ON d.liquidacion = l.id 
+						WHERE d.rubro = data_.id AND l.anio = 2023 and l.predio = predio.id;
+				END IF;
+				--- CEM5==> CEM MALECON 
+				IF data_.id = 987 AND data_.estado = true THEN
+					IF data_.valor > 0 THEN 
+						calculo_mejora3 := data_.valor;
+					ELSE 
+						SELECT d.valor INTO calculo_mejora3 FROM sgm_financiero.ren_liquidacion l
+						INNER JOIN sgm_financiero.ren_det_liquidacion d ON d.liquidacion = l.id 
+						WHERE d.rubro = data_.id AND l.anio = 2023 and l.predio = predio.id;
+						--WHERE d.rubro = 987 AND l.anio = 2023 and l.predio = 22726; 
+					END IF;
+				END IF;
+			END IF;
+		end loop;
+		
+		---IMPUESTO PREDIO URBANO (EXCLUYE A LOS PREDIOS DE TENENCIA MUNICIPAL - PUBLICA Y ESTADO )
+		IF(predio.propiedad NOT IN (3839))THEN 
+			IF predio.avaluo_municipal > remuneraciones_salariales_25 THEN  
+				impuesto_predial := ((predio.avaluo_municipal * banda.multiplo_impuesto_predial) / 1000);
+			END IF;
+		END IF;
+			
+		IF (impuesto_predial IS NULL ) THEN impuesto_predial:= 0; END IF;
+								
+		resut := catastro.save_ren_liquidacion(_predio_id, usuario, round(avaluo_municipal ,2), round(impuesto_predial,2), 
+				round(tasa_seg,2), round(calculo_bombero,2), round(calculo_mejora,2), anio_inicio_val, anio_fin_val, 
+				valor_banda, round(calculo_mejora1,2), round(valor_tasa_administrativa,2 ), considera_construccion, 
+				round(calculo_mejora2,2), round(calculo_mejora3,2), round(calculo_mejora4,2));
+		resut_total_emitido = resut_total_emitido + resut;
+		IF resut_total_emitido <= 0 THEN 
+			RAISE NOTICE 'PREDIO % IMPUESTO MUNICIPAL % BANDA IMPOSITIVA %', predio.id, resut, banda;
+		END IF;
+		
+	END
+$function$
+;
+-- 
+
+select count(*) FROM catastro.cat_predio p WHERE estado = 'A' AND tipo_predio = 'U'; -- 5497
+select tipo_predio, count(*) FROM catastro.cat_predio p WHERE estado = 'A' group by 1; -- 5497
+select tipo_predio, estado, count(*) FROM catastro.cat_predio p group by 1, 2 order by 1, 3; -- 5497
+
+select dl.* from sgm_financiero.ren_liquidacion l
+INNER JOIN sgm_financiero.ren_det_liquidacion dl ON l.id = dl.liquidacion
+where l.anio = 2025 and l.TIPO_LIQUIDACION = 303 
+GROUP by 1 
+
+select * from catastro.cat_predio where num_predio = 2422;
+-- 
+select * from sgm_financiero.ren_liquidacion L WHERE l.anio = 2025 
+select * from sgm_financiero.ren_liquidacion L WHERE l.anio = 2024 and l.predio = 21659; 
+
+-- Predial
+select l.tipo_liquidacion, p.clave_cat, p.num_predio, l.id_liquidacion,
+CASE WHEN e.id IS NULL then TRIM(l.nombre_comprador) else TRIM(COALESCE(e.apellidos,'')||' '||COALESCE(e.nombres,'')||' '||COALESCE(e.razon_social,'')) END AS contribuyente
+, c.nombre AS ciudadela, 
+COALESCE(p.area_solar, 0.00) area_solar, 
+COALESCE(l.avaluo_solar, 0.00) avaluo_solar, 
+COALESCE(p.area_total_cons, 0.00) area_total_cons, 
+COALESCE(l.avaluo_construccion, 0.00) avaluo_construccion, 
+COALESCE(l.avaluo_municipal, 0.00) avaluo_municipal, 
+COALESCE(d.valor, 0.00) impuesto_predial,
+COALESCE(m.valor, 0.00) servicio_adm,
+COALESCE(B.valor, 0.00) solar_no_edif,
+COALESCE(OB.valor, 0.00) constuccion_obs,
+COALESCE(s.valor, 0.00) bomberos,
+COALESCE(em.valor, 0.00) mejora1,
+COALESCE(CO2.valor, 0.00) cem2,
+COALESCE(CEM3.valor, 0.00) cem3,
+COALESCE(CEM4.valor, 0.00) cem4,
+COALESCE(CEM5.valor, 0.00) cem5,
+COALESCE(TSEG.valor, 0.00) tasa_seg 
+FROM sgm_financiero.ren_liquidacion l
+INNER JOIN catastro.cat_predio p on l.predio =p.id 
+LEFT OUTER JOIN catastro.cat_ente e ON e.id = l.comprador 
+LEFT OUTER JOIN catastro.cat_ciudadela c ON (p.ciudadela=c.id)
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion D    ON (l.id = d.liquidacion AND D.RUBRO=2)     --IMPUESTO PREDIAL
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion M    ON (l.id = m.liquidacion AND M.RUBRO=3)     --SERVICIS ADMINSTRATIVOS
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion B    ON (l.id = b.liquidacion AND B.RUBRO=4)     --SOLAR NO EDIFICADO
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion OB   ON (l.id = ob.liquidacion AND OB.RUBRO=6)    --CONSTRUCCION OBSOLETA
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion S    ON (l.id = s.liquidacion AND S.RUBRO=7)     --BOMBEROS
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion EM   ON (l.id = EM.liquidacion AND EM.RUBRO=8)    --MEJORA 1
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion CO2  ON (l.id = CO2.liquidacion AND CO2.RUBRO=640) --CEM2
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion CEM3 ON (l.id = CEM3.liquidacion AND CEM3.RUBRO=986)--CEM3
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion CEM4 ON (l.id = CEM4.liquidacion AND CEM4.RUBRO=989)--CEM4
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion CEM5 ON (l.id = CEM5.liquidacion AND CEM5.RUBRO=987)--CEM5
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion TSEG ON (l.id = TSEG.liquidacion AND TSEG.RUBRO=988)--TASA SEG
+WHERE l.anio = 2025 and l.TIPO_LIQUIDACION = 13 
+order by c.nombre, p.clave_cat;
+
+
+-- Contribucion especial de mojras
+select l.tipo_liquidacion, p.clave_cat, p.num_predio, l.id_liquidacion,
+CASE WHEN e.id IS NULL then TRIM(l.nombre_comprador) else TRIM(COALESCE(e.apellidos,'')||' '||COALESCE(e.nombres,'')||' '||COALESCE(e.razon_social,'')) END AS contribuyente
+, c.nombre AS ciudadela, p.area_solar, l.avaluo_solar, p.area_total_cons, l.avaluo_construccion, l.avaluo_municipal, 
+COALESCE(TSEG.valor, 0.00) valor 
+FROM sgm_financiero.ren_liquidacion l
+INNER JOIN catastro.cat_predio p on l.predio =p.id 
+LEFT OUTER JOIN catastro.cat_ente e ON e.id = l.comprador 
+LEFT OUTER JOIN catastro.cat_ciudadela c ON (p.ciudadela=c.id)
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion TSEG ON (l.id = TSEG.liquidacion AND TSEG.RUBRO=990)-- con
+WHERE l.anio = 2025 and l.TIPO_LIQUIDACION = 303  
+order by c.nombre, p.clave_cat;
+
+
+--***********************************************************************************************************************************************************************
+--******************************************************************************** RURAL ********************************************************************************
+--***********************************************************************************************************************************************************************
+
+-- DROP FUNCTION migrar_temp.migrarprediorural_anual();
+
+select * from migrar_temp.predio_rural ;
+
+
+CREATE OR REPLACE FUNCTION migrar_temp.migrarprediorural_anual()
+ RETURNS void
+ LANGUAGE plpgsql
+AS $function$
+DECLARE comprador            BIGINT;		DECLARE ID_REN_LIQUIDACION   BIGINT;
+DECLARE ID_PAGO              BIGINT;		DECLARE bomberoexist         BOOLEAN;
+DECLARE rubro                BIGINT;		DECLARE estadoLiquidacion    BIGINT;
+DECLARE tipoLiquidacion      BIGINT;		DECLARE observacion          TEXT;
+DECLARE num_cedula           TEXT;			DECLARE nombre_compra        TEXT;
+DECLARE estado_pago          BOOLEAN;		DECLARE exonera	             BOOLEAN;
+DECLARE saldo                DECIMAL;		DECLARE predioUrbano         BIGINT;   
+DECLARE predioRural          BIGINT;		DECLARE count_ 				 BIGINT;
+DECLARE 
+--CURSORES
+   T_TITULO_PREDIAL CURSOR FOR
+   	SELECT 
+		ROW_NUMBER() OVER(PARTITION BY pr.anio ORDER BY pr.anio, numpre::integer) num_liquidacion,
+	    superf			AS area_total, 			numpre 			AS pre_codigo_catastral, 
+		idpred       	AS num_titulo,			coalesce(avaluon, "Avaluo") 		AS valor_terr_predio,  
+		0		   		AS valor_edif_predio,	coalesce(avaluon, "Avaluo")       	AS val_comer_predio,
+		ipr           	AS ipu,					0			    AS solar_no_edificado, 
+		"bom"           AS bomberos,			extract(year from now()) || '-01-01'::timestamp without time zone    AS fecha_emision, 
+		total1         	AS total,				null   	        AS estado_liquidacion, 
+		ser   			AS tasa_administrativa,	seg   			AS tasa_seguro,
+		tman   			AS tasa_mantenimiento,	coalesce(avaluon, "Avaluo")       	AS base_imponible, 
+		'admin'	        AS usuario,				cedula       	AS ci, 
+		ubi  		    AS direccion_cont,		propie          AS nombre_comprador, 
+		propie       	AS propietario,			'Rural'     	AS tipo,
+	    pr.anio 			AS anio,				cp.id	 		AS predio,
+		"Tipo_exonera"	AS exoneracion,			'PR'			AS tipo_predio 
+		FROM migrar_temp.predio_rural pr
+		left outer join (select cp.id , cp.tipo_predio, cp.clave_cat from catastro.cat_predio cp WHERE cp.tipo_predio = 'R') cp on pr.numpre::numeric = cp.clave_cat::numeric 
+		LEFT JOIN sgm_financiero.ren_liquidacion L on (L.ANIO=pr.anio AND L.PREDIO = CP.ID)
+		where cp.tipo_predio = 'R' and l.id is null;
+	BEGIN 
+		count_ = 0;
+		count_= migrar_temp.insertarcatpredio_anual();
+		RAISE NOTICE 'Creacion de predio nuevos %', count_;
+		
+		count_ = 0;
+	   	FOR T IN T_TITULO_PREDIAL LOOP 
+		  		 
+	      nombre_compra = t.nombre_comprador;
+		  num_cedula = T.ci;
+	      	IF( (SELECT COUNT(*) FROM catastro.cat_ente ente WHERE ci_ruc = T.ci)>=1 ) THEN
+	      			comprador = (SELECT id FROM catastro.cat_ente WHERE ci_ruc = T.ci LIMIT 1);
+	      	ELSE
+	      		comprador = (select cpp.ente from catastro.cat_predio_propietario cpp where cpp.predio = T.predio limit 1);
+	 		END IF;
+	 	IF( T.bomberos > 0 ) THEN
+	 	     bomberoexist = TRUE;	
+	 	ELSE
+	     bomberoexist = FALSE;	
+	    END IF;
+	   count_ = count_ + 1;
+		IF T.estado_liquidacion is null THEN estadoLiquidacion = 2; saldo = T.total; END IF;
+		IF(T.tipo = 'Rural') THEN tipoLiquidacion = 7; 
+			predioUrbano = T.predio;
+			IF(predioUrbano IS NULL) THEN
+				predioUrbano :=  (select cp.id from catastro.cat_predio cp where cp.clave_cat = T.pre_codigo_catastral limit 1);
+			END IF;	
+		END IF;	
+					
+		IF T.fecha_emision is null then
+			T.fecha_emision = now();
+		end if;
+	
+        INSERT INTO sgm_FINANCIERO.REN_LIQUIDACION( NUM_LIQUIDACION, ID_LIQUIDACION, TIPO_LIQUIDACION, TOTAL_PAGO, USUARIO_INGRESO,
+	    	FECHA_INGRESO, COMPRADOR, FECHA_CONTRATO_ANT, ESTADO_LIQUIDACION, PREDIO,ANIO, VALOR_COMERCIAL, AVALUO_MUNICIPAL, 
+	    	AVALUO_CONSTRUCCION, AVALUO_SOLAR, BOMBERO, ubicacion, 
+            NOMBRE_COMPRADOR, IDENTIFICACION, estado_coactiva, saldo, predio_rustico, estado_referencia, migrado, area_total,exonerado)   
+      	VALUES ( T.num_liquidacion, T.num_titulo, tipoLiquidacion, T.total, 'admin', 
+      		T.fecha_emision, comprador, T.fecha_emision,  estadoLiquidacion, predioUrbano, T.anio, T.val_comer_predio, (T.valor_edif_predio + T.valor_terr_predio), 
+            T.valor_edif_predio, T.valor_terr_predio, bomberoexist,	T.direccion_cont, 
+            nombre_compra, num_cedula, 1, saldo, predioRural, T.estado_liquidacion, true, t.area_total,exonera)
+		RETURNING id INTO ID_REN_LIQUIDACION;
+    --INSERCION DE RUBROS EN DET_LIQUIDACION CUANDO NO ESTA PAGADA SOLO EN RED_DET_LIQUIDACION
+		IF(estadoLiquidacion = 2) THEN 
+		--PREDIOS RURALES
+			IF(T.tasa_administrativa > 0) THEN
+				rubro =  23;
+				INSERT INTO sgm_FINANCIERO.ren_det_liquidacion(liquidacion, rubro, valor, estado, valor_recaudado)
+				    VALUES (ID_REN_LIQUIDACION, rubro, T.tasa_administrativa, TRUE, 0.00);
+			END IF;	
+		-- Impuesto
+			IF(T.ipu > 0) THEN
+				rubro = 18;		
+				INSERT INTO sgm_FINANCIERO.ren_det_liquidacion(liquidacion, rubro, valor, estado, valor_recaudado)
+					VALUES (ID_REN_LIQUIDACION, rubro, T.ipu, TRUE, 0.00);
+			END IF;
+		-- Bomberos
+			IF (T.bomberos > 0) THEN
+				rubro =  21;
+				INSERT INTO sgm_FINANCIERO.ren_det_liquidacion( liquidacion, rubro, valor, estado, valor_recaudado)				    
+				    VALUES (ID_REN_LIQUIDACION, rubro, T.bomberos, TRUE, 0.00);
+			END IF;
+		--tasa_seguro		
+			IF(T.tasa_seguro > 0) THEN			
+				rubro =  1123;				
+				INSERT INTO sgm_FINANCIERO.ren_det_liquidacion(liquidacion, rubro, valor, estado,valor_recaudado)
+				    VALUES (ID_REN_LIQUIDACION, rubro, T.tasa_seguro, TRUE,  0.00);
+			END IF;
+		--tasa_mantenimiento		
+			IF(T.tasa_mantenimiento > 0) THEN			
+				rubro =  1258;				
+				INSERT INTO sgm_FINANCIERO.ren_det_liquidacion(liquidacion, rubro, valor, estado,valor_recaudado)
+				    VALUES (ID_REN_LIQUIDACION, rubro, T.tasa_mantenimiento, TRUE,  0.00);
+			END IF;
+		END IF;
+		IF (count_ % 100) = 0 THEN 
+			RAISE NOTICE 'count_ % ', count_;
+		END IF;
+	END LOOP;
+
+	RAISE NOTICE 'pROCESADOS count_ % ', count_;
+END;
+$function$
+;
+
+
+select migrar_temp.migrarprediorural_anual();
+
+
+-- Predial
+select l.tipo_liquidacion, p.clave_cat, p.num_predio, l.id_liquidacion,
+CASE WHEN e.id IS NULL then TRIM(l.nombre_comprador) else TRIM(COALESCE(e.apellidos,'')||' '||COALESCE(e.nombres,'')||' '||COALESCE(e.razon_social,'')) END AS contribuyente
+, c.nombre AS ciudadela, 
+COALESCE(p.area_solar, 0.00) area_solar, 
+COALESCE(l.avaluo_solar, 0.00) avaluo_solar, 
+COALESCE(p.area_total_cons, 0.00) area_total_cons, 
+COALESCE(l.avaluo_construccion, 0.00) avaluo_construccion, 
+COALESCE(l.avaluo_municipal, 0.00) avaluo_municipal, 
+COALESCE(d.valor, 0.00) impuesto_predial,
+COALESCE(m.valor, 0.00) servicio_adm,
+COALESCE(B.valor, 0.00) solar_no_edif,
+COALESCE(OB.valor, 0.00) constuccion_obs,
+COALESCE(s.valor, 0.00) bomberos 
+FROM sgm_financiero.ren_liquidacion l
+INNER JOIN catastro.cat_predio p on l.predio =p.id 
+LEFT OUTER JOIN catastro.cat_ente e ON e.id = l.comprador 
+LEFT OUTER JOIN catastro.cat_ciudadela c ON (p.ciudadela=c.id)
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion D    ON (l.id = d.liquidacion AND D.RUBRO=23)     --tasa_administrativa
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion M    ON (l.id = m.liquidacion AND M.RUBRO=18)     --Impuesto
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion B    ON (l.id = b.liquidacion AND B.RUBRO=21)     --Bomberos
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion OB   ON (l.id = ob.liquidacion AND OB.RUBRO=1123) --tasa_seguro
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion S    ON (l.id = s.liquidacion AND S.RUBRO=1258)   --tasa_mantenimiento
+WHERE l.anio = 2025 and l.TIPO_LIQUIDACION = 7 
+order by c.nombre, p.clave_cat;
+
+
+-- CEM NUEVO
+select * from SGM_FINANCIERO.ren_tipo_liquidacion where id = 303 
+select * from SGM_FINANCIERO.ren_tipo_liquidacion where id = 13 
+select max(codigo_titulo_reporte) from SGM_FINANCIERO.ren_tipo_liquidacion;
+
+INSERT INTO sgm_financiero.ren_tipo_liquidacion
+(nombre_titulo, prefijo, estado, usuario_ingreso, fecha_ingreso, codigo_titulo_reporte, nombre_transaccion, transaccion_padre, tipo_transaccion, mostrar_transaccion, nombre_reporte, permite_anulacion, permite_exoneracion, muestra_planificacion, pago_inicio, tramite_en_linea, genera_intere)
+VALUES('CONTRUBICIÓN ESPECIAL 2024', 'C24', true, 'admin', now(), 296, 'CEM 2024', 0, 2, false, 'sEmisionPredioUrbanoGeneral', false, false, true, true, true, true) returning id; -- 405
+
+select * from SGM_FINANCIERO.ren_rubros_liquidacion where tipo_liquidacion = 13;
+
+INSERT INTO sgm_financiero.ren_rubros_liquidacion (estado, valor, tipo_liquidacion, prioridad, tipo_valor, rubro_del_municipio, descripcion)
+VALUES(true, 0.38, 405, 1, 1, true, 'Construcción de aceras y bordillos. Calle Segunda Rojas y Alcides Maldonado')
+	 ,(true, 2.21, 405, 2, 1, true, 'Regeneración Urbana del malecón. Sector Barrio Lindo')
+	 ,(true, 0.69, 405, 3, 1, true, 'Construcción de puente carrozable. Calle Eloy Alfaro y Coop 23 de Agosto') returning id;
+/*
+1336
+1337
+1338
+ */
+
+SELECT p.id as predio, p.avaluo_construccion, p.avaluo_solar, p.avaluo_municipal, p.tipo_predio, p.num_predio, p.AREA_SOLAR 
+				, l.total_pago, rl.valor, l.identificacion      
+				FROM catastro.cat_predio p inner join SGM_FINANCIERO.ren_liquidacion l on L.PREDIO = P.ID 
+				left join SGM_FINANCIERO.ren_det_liquidacion rl on rl.liquidacion = l.id and rl.rubro = 2 
+				WHERE p.estado = 'A' AND p.tipo_predio = 'U' and l.anio = 2025 and rl.valor > 0 
+				and l.TIPO_LIQUIDACION = 13 
+				ORDER BY p.num_predio asc ; 
+
+select * from sgm_financiero.ren_liquidacion where TIPO_LIQUIDACION = 13 and anio = 2025 limit 10;
+
+CREATE OR REPLACE FUNCTION catastro.emision_cem_nuevo_anual(usuario_ text, anio_fin_val integer)
+ RETURNS text
+ LANGUAGE plpgsql
+AS $function$
+<<fn>>
+	DECLARE
+		predio RECORD;
+		resp text;
+		avaluo_anterior RECORD;
+		ACIERTOS BIGINT := 0;
+		total_reg BIGINT := 0;
+		
+	declare contador1 integer;
+	declare em record;
+	declare em_det record;
+	DECLARE cem_migra BIGINT;
+	DECLARE rubro_cem bigint = 405;
+	DECLARE rubro_urbano bigint = 13;
+
+	BEGIN
+		select count(*) into total_reg FROM catastro.cat_predio p inner join SGM_FINANCIERO.ren_liquidacion l on L.PREDIO = P.ID 
+				left join SGM_FINANCIERO.ren_det_liquidacion rl on rl.liquidacion = l.id and rl.rubro = 2 
+				WHERE p.estado = 'A' AND p.tipo_predio = 'U' and rl.valor > 0 
+				and l.TIPO_LIQUIDACION = rubro_urbano AND l.anio = anio_fin_val;
+		if total_reg is null or total_reg = 0 then 
+			raise notice 'Debe realizar la emison urbana del anio % para continuar', anio_fin_val;
+			return 'Debe realizar la emison urbana del anio ' || anio_fin_val || ' para continuar';
+		ELSE 
+
+			ACIERTOS = 0;
+			--SE LE ENVIA CERO CUANDO SSE VAN A EVALUAR TODOS LOS PREDIOS 
+			FOR predio IN SELECT p.id as predio_id, p.avaluo_construccion, p.avaluo_solar, p.avaluo_municipal, p.tipo_predio, p.num_predio
+				, p.AREA_SOLAR 
+				, l.total_pago, rl.valor, l.comprador, l.identificacion
+				FROM catastro.cat_predio p inner join SGM_FINANCIERO.ren_liquidacion l on L.PREDIO = P.ID 
+				left join SGM_FINANCIERO.ren_det_liquidacion rl on rl.liquidacion = l.id and rl.rubro = 2 
+				WHERE p.estado = 'A' AND p.tipo_predio = 'U' and l.anio = anio_fin_val and l.total_pago > 0 
+				and l.TIPO_LIQUIDACION = rubro_urbano 
+				and p.id NOT IN (19241)
+				ORDER BY p.num_predio asc LOOP 
+
+				ACIERTOS := ACIERTOS + 1;
+		
+				INSERT INTO sgm_financiero.ren_liquidacion(num_liquidacion, id_liquidacion, tipo_liquidacion, total_pago, usuario_ingreso, 
+													   fecha_ingreso, comprador, costo_adq, cuantia, saldo, estado_liquidacion, coactiva, 
+													   predio, observacion, anio, valor_comercial, valor_catastral, 
+													   valor_hipoteca, valor_nominal, valor_mora, total_adicionales, otros, valor_compra, valor_venta, valor_mejoras, 
+													   area_total, patrimonio, avaluo_municipal, 
+													   avaluo_construccion, avaluo_solar, bombero, estado_coactiva, exonerado, banda_impositiva, 
+													   identificacion, temporal, validada, fecha_creacion_original, base_imponible, usuario_valida, rentas)
+				values(ACIERTOS, anio_fin_val||'-'||lpad(ACIERTOS::text, 6, '0'::TEXT), rubro_cem, 0.00, usuario_, 
+					now(), predio.comprador, 0.00, predio.avaluo_municipal, 0.00, 2, FALSE, 
+					predio.predio_id, 'Emisión Contribución Especial de Mejoras ' || anio_fin_val || ' 1/15', anio_fin_val, predio.avaluo_municipal, 0.00, 
+					0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 
+					predio.AREA_SOLAR, 0.00, predio.avaluo_municipal, 
+					predio.avaluo_construccion, predio.avaluo_solar, false, 1, false, 0.00, 
+					predio.identificacion, false, true, now(), predio.avaluo_municipal, usuario_, false)
+					RETURNING id INTO cem_migra;
+		
+				FOR em_det IN SELECT * FROM SGM_FINANCIERO.ren_rubros_liquidacion where tipo_liquidacion = rubro_cem LOOP
+					insert into sgm_financiero.ren_det_liquidacion(liquidacion, rubro, valor, estado, valor_recaudado) 
+						values (cem_migra, em_det.id, em_det.valor, true, 0.00);
+				END LOOP;
+	
+				if (ACIERTOS % 100) = 0 then 
+					RAISE NOTICE 'Registro procesados % de %', ACIERTOS, total_reg;
+				end if;
+			END LOOP;
+			-- Actualizacion de rubro en emision 
+			with s as (
+				select sum(d.valor) total_s, d.liquidacion from sgm_financiero.ren_liquidacion l 
+				inner join sgm_financiero.ren_det_liquidacion d on l.id = d.liquidacion 
+				where l.anio = anio_fin_val and l.tipo_liquidacion = rubro_cem group by 2
+			) update sgm_financiero.ren_liquidacion lx set total_pago = s.total_s, saldo = s.total_s from s where s.liquidacion=lx.id;
+			
+			RAISE NOTICE 'PROCESADOS MEJORAS %', contador1;
+	
+		RETURN 'OKI';
+		end if;
+	END
+$function$
+;
+
+select * from 
+
+select max(id) from sgm_financiero.ren_liquidacion;  -- 501016
+select max(id) from sgm_financiero.ren_det_liquidacion; -- 1880729
+
+select catastro.emision_cem_nuevo_anual(current_user, 2025);
+
+select * from CATASTRO.cat_predio where clave_cat = '1212501105202100000000';-- 38838
+ 
+
+
+-- Predial
+select l.tipo_liquidacion, p.clave_cat, p.num_predio, l.id_liquidacion, e.id, l.nombre_comprador, 
+CASE WHEN e.id IS NULL then TRIM(l.nombre_comprador) else TRIM(COALESCE(e.apellidos,'')||' '||COALESCE(e.nombres,'')||' '||COALESCE(e.razon_social,'')) END AS contribuyente
+, c.nombre AS ciudadela, 
+COALESCE(p.area_solar, 0.00) area_solar, 
+COALESCE(l.avaluo_solar, 0.00) avaluo_solar, 
+COALESCE(p.area_total_cons, 0.00) area_total_cons, 
+COALESCE(l.avaluo_construccion, 0.00) avaluo_construccion, 
+COALESCE(l.avaluo_municipal, 0.00) avaluo_municipal, 
+COALESCE(d.valor, 0.00) const_ac_bord,
+COALESCE(m.valor, 0.00) regen_ur_male,
+COALESCE(B.valor, 0.00) const_pu_carr 
+FROM sgm_financiero.ren_liquidacion l
+INNER JOIN catastro.cat_predio p on l.predio =p.id 
+LEFT OUTER JOIN catastro.cat_ente e ON e.id = l.comprador 
+LEFT OUTER JOIN catastro.cat_ciudadela c ON (p.ciudadela=c.id)
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion D    ON (l.id = d.liquidacion AND D.RUBRO=1336)     --mejora1
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion M    ON (l.id = m.liquidacion AND M.RUBRO=1337)     --mejora2
+LEFT OUTER JOIN SGM_FINANCIERO.ren_det_liquidacion B    ON (l.id = b.liquidacion AND B.RUBRO=1338)     --mejora3
+WHERE l.anio = 2025 and l.TIPO_LIQUIDACION = 405 
+-- and p.id = 38838 
+order by c.nombre, p.clave_cat;
+
+
+select * from CATASTRO.cat_predio_propietario where predio = 18303;
+
+with s as (
+	select distinct l.id liquidacion, l.comprador, cp.ente, P.ID PREDIO
+	from sgm_financiero.ren_liquidacion l 
+	inner join CATASTRO.cat_predio p on P.ID = l.predio 
+	LEFT join CATASTRO.cat_predio_propietario cp on cp.predio = p.id and cp.estado = 'A' and cp.TIPO = 60 
+	inner join catastro.cat_ente e on E.ID = CP.ENTE and e.ci_ruc is not null 
+	where l.anio = 2025 and l.tipo_liquidacion = 303 
+	and l.comprador is null 
+	-- AND p.id = 21420 
+	order by P.ID 
+) update sgm_financiero.ren_liquidacion lx set comprador = s.ente from s where s.liquidacion=lx.id;
+
+select * from sgm_financiero.ren_liquidacion where tipo_liquidacion = 7 and anio = 2024;
+select * from sgm_financiero.ren_liquidacion where tipo_liquidacion = 7 and anio = 2025;
+
+select * from MIGRAR_TEMP.predio_rural 
+
+with upr as (
+	select pr."Avaluo" avaluo, l.id from migrar_temp.predio_rural pr
+	left outer join (select cp.id , cp.tipo_predio, cp.clave_cat from catastro.cat_predio cp WHERE cp.tipo_predio = 'R') cp on pr.numpre::numeric = cp.clave_cat::numeric 
+	LEFT JOIN sgm_financiero.ren_liquidacion L on (L.ANIO=pr.anio AND L.PREDIO = CP.ID)
+	where cp.tipo_predio = 'R' 
+	and l.anio = 2025
+) update sgm_financiero.ren_liquidacion lx set avaluo_solar = upr.avaluo, 
+avaluo_municipal = upr.avaluo, valor_comercial = upr.avaluo from upr where upr.id = lx.id
+
